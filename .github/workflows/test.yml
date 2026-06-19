@@ -8,14 +8,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v3
 
-      - name: Test and update configs
+      - name: Download Xray
+        run: |
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q Xray-linux-64.zip xray
+          chmod +x xray
+          echo "Xray version: $(./xray version | head -1)"
+
+      - name: Test configs with Xray
         run: |
           python3 << 'PYEOF'
-          import socket, base64, json
+          import socket, base64, json, subprocess, time, os, tempfile
           from urllib.parse import urlparse
           from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -38,18 +45,12 @@ jobs:
 
           KEYWORDS = [
             ("frankfurt","DE"),("berlin","DE"),("ger","DE"),("germany","DE"),
-            ("amsterdam","NL"),("netherlands","NL"),
-            ("paris","FR"),("france","FR"),
-            ("london","GB"),("britain","GB"),
-            ("toronto","CA"),("canada","CA"),
-            ("singapore","SG"),
-            ("tokyo","JP"),("japan","JP"),
-            ("seoul","KR"),("korea","KR"),
-            ("moscow","RU"),("russia","RU"),
-            ("tehran","IR"),("iran","IR"),
-            ("finland","FI"),("sweden","SE"),("norway","NO"),
-            ("switzerland","CH"),("austria","AT"),("poland","PL"),
-            ("ukraine","UA"),("turkey","TR"),("istanbul","TR"),
+            ("amsterdam","NL"),("netherlands","NL"),("paris","FR"),("france","FR"),
+            ("london","GB"),("britain","GB"),("toronto","CA"),("canada","CA"),
+            ("singapore","SG"),("tokyo","JP"),("japan","JP"),("seoul","KR"),("korea","KR"),
+            ("moscow","RU"),("russia","RU"),("tehran","IR"),("iran","IR"),
+            ("finland","FI"),("sweden","SE"),("norway","NO"),("switzerland","CH"),
+            ("austria","AT"),("poland","PL"),("ukraine","UA"),("turkey","TR"),("istanbul","TR"),
             ("india","IN"),("brazil","BR"),("hongkong","HK"),("taiwan","TW"),
             ("china","CN"),("dubai","AE"),("australia","AU"),
             ("usa","US"),("newyork","US"),("losangeles","US"),("dallas","US"),
@@ -65,69 +66,222 @@ jobs:
                 return code
             return "XX"
 
+          def find_free_port():
+            with socket.socket() as s:
+              s.bind(('', 0))
+              return s.getsockname()[1]
+
           def parse_config(cfg):
             try:
               if cfg.startswith("vmess://"):
                 b64 = cfg[8:].split("#")[0]
-                data = json.loads(base64.b64decode(b64 + "==").decode())
-                return data.get("add",""), int(data.get("port",443))
-              elif cfg.startswith(("vless://","trojan://")):
+                padded = b64 + "=" * (-len(b64) % 4)
+                data = json.loads(base64.b64decode(padded).decode())
+                return "vmess", data
+              elif cfg.startswith("vless://"):
                 u = urlparse(cfg)
-                return u.hostname, u.port or 443
+                params = dict(p.split("=",1) for p in u.query.split("&") if "=" in p)
+                return "vless", {"host": u.hostname, "port": u.port or 443,
+                                  "id": u.username, "params": params, "path": u.path}
+              elif cfg.startswith("trojan://"):
+                u = urlparse(cfg)
+                params = dict(p.split("=",1) for p in u.query.split("&") if "=" in p)
+                return "trojan", {"host": u.hostname, "port": u.port or 443,
+                                   "password": u.username, "params": params, "path": u.path}
               elif cfg.startswith("ss://"):
                 u = urlparse(cfg)
-                return u.hostname, u.port or 443
+                return "ss", {"host": u.hostname, "port": u.port or 443,
+                               "userinfo": u.username}
             except:
               pass
             return None, None
 
-          def tcp_test(host, port, timeout=3):
-            try:
-              s = socket.socket()
-              s.settimeout(timeout)
-              s.connect((host, int(port)))
-              s.close()
-              return True
-            except:
-              return False
+          def build_xray_config(proto, data, socks_port):
+            if proto == "vmess":
+              outbound = {
+                "protocol": "vmess",
+                "settings": {"vnext": [{
+                  "address": data.get("add",""),
+                  "port": int(data.get("port", 443)),
+                  "users": [{"id": data.get("id",""), "alterId": int(data.get("aid",0))}]
+                }]},
+                "streamSettings": {
+                  "network": data.get("net","tcp"),
+                  "security": data.get("tls",""),
+                  "wsSettings": {"path": data.get("path","/"), "headers": {"Host": data.get("host","")}},
+                  "tlsSettings": {"serverName": data.get("sni", data.get("host",""))},
+                }
+              }
+              host_for_country = data.get("add","")
 
-          def process(item):
-            i, cfg = item
-            host, port = parse_config(cfg)
-            if not host:
-              return i, None, None
-            ok = tcp_test(host, port)
-            return i, cfg, host if ok else None
+            elif proto == "vless":
+              params = data.get("params", {})
+              stream = {
+                "network": params.get("type","tcp"),
+                "security": params.get("security",""),
+              }
+              if params.get("type") == "ws":
+                stream["wsSettings"] = {
+                  "path": params.get("path", data.get("path","/")),
+                  "headers": {"Host": params.get("host", data["host"])}
+                }
+              if params.get("security") in ("tls","reality"):
+                stream["tlsSettings"] = {"serverName": params.get("sni", data["host"])}
+              if params.get("security") == "reality":
+                stream["realitySettings"] = {
+                  "serverName": params.get("sni",""),
+                  "fingerprint": params.get("fp","chrome"),
+                  "publicKey": params.get("pbk",""),
+                  "shortId": params.get("sid",""),
+                }
+              outbound = {
+                "protocol": "vless",
+                "settings": {"vnext": [{
+                  "address": data["host"],
+                  "port": data["port"],
+                  "users": [{"id": data["id"], "encryption": "none"}]
+                }]},
+                "streamSettings": stream
+              }
+              host_for_country = data["host"]
+
+            elif proto == "trojan":
+              params = data.get("params", {})
+              stream = {"network": params.get("type","tcp"), "security": "tls"}
+              if params.get("type") == "ws":
+                stream["wsSettings"] = {
+                  "path": params.get("path", data.get("path","/")),
+                  "headers": {"Host": params.get("host", data["host"])}
+                }
+              stream["tlsSettings"] = {"serverName": params.get("sni", data["host"])}
+              outbound = {
+                "protocol": "trojan",
+                "settings": {"servers": [{
+                  "address": data["host"],
+                  "port": data["port"],
+                  "password": data["password"]
+                }]},
+                "streamSettings": stream
+              }
+              host_for_country = data["host"]
+
+            elif proto == "ss":
+              try:
+                userinfo = data["userinfo"]
+                padded = userinfo + "=" * (-len(userinfo) % 4)
+                decoded = base64.b64decode(padded).decode()
+                method, password = decoded.split(":", 1)
+              except:
+                return None, None
+              outbound = {
+                "protocol": "shadowsocks",
+                "settings": {"servers": [{
+                  "address": data["host"],
+                  "port": data["port"],
+                  "method": method,
+                  "password": password
+                }]}
+              }
+              host_for_country = data["host"]
+
+            else:
+              return None, None
+
+            config = {
+              "log": {"loglevel": "none"},
+              "inbounds": [{
+                "port": socks_port,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": False}
+              }],
+              "outbounds": [outbound, {"protocol": "freedom", "tag": "direct"}]
+            }
+            return config, host_for_country
+
+          def test_with_xray(cfg, index):
+            proto, data = parse_config(cfg)
+            if not proto:
+              return index, cfg, None, "parse_error"
+
+            socks_port = find_free_port()
+            xray_cfg, host = build_xray_config(proto, data, socks_port)
+            if not xray_cfg:
+              return index, cfg, None, "build_error"
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+              json.dump(xray_cfg, f)
+              cfg_path = f.name
+
+            proc = None
+            try:
+              proc = subprocess.Popen(
+                ["./xray", "run", "-c", cfg_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+              )
+              time.sleep(1.5)
+
+              result = subprocess.run(
+                ["curl", "-s", "--socks5-hostname", f"127.0.0.1:{socks_port}",
+                 "--max-time", "8", "-o", "/dev/null", "-w", "%{http_code}",
+                 "http://cp.cloudflare.com/"],
+                capture_output=True, text=True, timeout=12
+              )
+              code = result.stdout.strip()
+              ok = code in ("200", "204")
+              return index, cfg, host if ok else None, f"http_{code}"
+
+            except subprocess.TimeoutExpired:
+              return index, cfg, None, "timeout"
+            except Exception as e:
+              return index, cfg, None, str(e)
+            finally:
+              if proc:
+                proc.terminate()
+                try: proc.wait(timeout=2)
+                except: proc.kill()
+              try: os.unlink(cfg_path)
+              except: pass
 
           with open("raw.txt") as f:
             configs = [l.strip() for l in f if l.strip()]
 
-          print(f"Testing {len(configs)} configs with 50 threads...")
+          # حذف تکراری‌ها
+          seen = set()
+          unique = []
+          for cfg in configs:
+            key = cfg.split("#")[0]
+            if key not in seen:
+              seen.add(key)
+              unique.append(cfg)
+          configs = unique
+          print(f"Testing {len(configs)} unique configs with Xray (10 threads)...")
+
           results = {}
-          with ThreadPoolExecutor(max_workers=50) as ex:
-            futures = {ex.submit(process, (i, cfg)): i for i, cfg in enumerate(configs)}
+          with ThreadPoolExecutor(max_workers=10) as ex:
+            futures = {ex.submit(test_with_xray, cfg, i): i for i, cfg in enumerate(configs)}
             for fut in as_completed(futures):
-              i, cfg, host = fut.result()
-              results[i] = (cfg, host)
+              i, cfg, host, reason = fut.result()
+              results[i] = (cfg, host, reason)
               done = len(results)
-              if done % 50 == 0:
-                print(f"Progress: {done}/{len(configs)}")
+              status = "✅" if host else "❌"
+              print(f"[{done}/{len(configs)}] {status} {host or reason}")
 
           valid = []
           for i in sorted(results):
-            cfg, host = results[i]
+            cfg, host, reason = results[i]
             if host:
               country = get_country(host)
               flag = FLAGS.get(country, "🌍")
               base = cfg.split("#")[0]
               valid.append(f"{base}#{flag}t.me/AmConfigGrabber")
 
-          print(f"\nValid: {len(valid)}/{len(configs)}")
+          print(f"\n✅ Valid: {len(valid)}/{len(configs)}")
           with open("configs.txt","w") as f:
             f.write("\n".join(valid))
           PYEOF
 
-      - name: Commit
+      - name: Commit results
         run: |
           git config user.email "bot@github.com"
           git config user.name "VPN Bot"
