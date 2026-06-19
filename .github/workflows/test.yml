@@ -17,6 +17,7 @@ jobs:
           python3 << 'PYEOF'
           import socket, base64, json
           from urllib.parse import urlparse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
 
           FLAGS = {
             "IR":"🇮🇷","US":"🇺🇸","DE":"🇩🇪","FR":"🇫🇷","GB":"🇬🇧","NL":"🇳🇱",
@@ -80,7 +81,7 @@ jobs:
               pass
             return None, None
 
-          def tcp_test(host, port, timeout=5):
+          def tcp_test(host, port, timeout=3):
             try:
               s = socket.socket()
               s.settimeout(timeout)
@@ -90,24 +91,36 @@ jobs:
             except:
               return False
 
+          def process(item):
+            i, cfg = item
+            host, port = parse_config(cfg)
+            if not host:
+              return i, None, None
+            ok = tcp_test(host, port)
+            return i, cfg, host if ok else None
+
           with open("raw.txt") as f:
             configs = [l.strip() for l in f if l.strip()]
 
-          print(f"Testing {len(configs)} configs...")
+          print(f"Testing {len(configs)} configs with 50 threads...")
+          results = {}
+          with ThreadPoolExecutor(max_workers=50) as ex:
+            futures = {ex.submit(process, (i, cfg)): i for i, cfg in enumerate(configs)}
+            for fut in as_completed(futures):
+              i, cfg, host = fut.result()
+              results[i] = (cfg, host)
+              done = len(results)
+              if done % 50 == 0:
+                print(f"Progress: {done}/{len(configs)}")
+
           valid = []
-          for i, cfg in enumerate(configs):
-            host, port = parse_config(cfg)
-            if not host:
-              print(f"[{i+1}/{len(configs)}] ❌ parse error")
-              continue
-            if tcp_test(host, port):
+          for i in sorted(results):
+            cfg, host = results[i]
+            if host:
               country = get_country(host)
               flag = FLAGS.get(country, "🌍")
               base = cfg.split("#")[0]
               valid.append(f"{base}#{flag}t.me/AmConfigGrabber")
-              print(f"[{i+1}/{len(configs)}] ✅ {host} → {flag}")
-            else:
-              print(f"[{i+1}/{len(configs)}] ❌ {host}")
 
           print(f"\nValid: {len(valid)}/{len(configs)}")
           with open("configs.txt","w") as f:
@@ -119,4 +132,4 @@ jobs:
           git config user.email "bot@github.com"
           git config user.name "VPN Bot"
           git add configs.txt
-          git diff --staged --quiet && echo "No changes" || git commit -m "✅ $(wc -l < configs.txt) valid configs" && git push
+          git diff --staged --quiet && echo "No changes" || (git commit -m "✅ $(wc -l < configs.txt) valid configs" && git push)
