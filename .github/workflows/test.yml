@@ -36,23 +36,19 @@ jobs:
             "PL":"🇵🇱","CZ":"🇨🇿","AT":"🇦🇹","ES":"🇪🇸","IT":"🇮🇹","TR":"🇹🇷",
             "IN":"🇮🇳","BR":"🇧🇷","UA":"🇺🇦","RO":"🇷🇴","CN":"🇨🇳","AE":"🇦🇪",
             "ID":"🇮🇩","MY":"🇲🇾","TH":"🇹🇭","VN":"🇻🇳","PH":"🇵🇭","MX":"🇲🇽",
-            "FI":"🇫🇮","BG":"🇧🇬","GR":"🇬🇷","HU":"🇭🇺","RS":"🇷🇸","SK":"🇸🇰",
+            "BG":"🇧🇬","GR":"🇬🇷","HU":"🇭🇺","RS":"🇷🇸","SK":"🇸🇰",
           }
 
-          # کش geoip برای جلوگیری از درخواست تکراری
           geo_cache = {}
           geo_lock = __import__("threading").Lock()
 
           def resolve_host(host):
-            """اگه دامنه بود IP پشتش رو برمیگردونه"""
             try:
-              ip = socket.gethostbyname(host)
-              return ip
+              return socket.gethostbyname(host)
             except:
               return host
 
           def get_geoip(ip):
-            """کشور و شهر رو از IP میگیره"""
             with geo_lock:
               if ip in geo_cache:
                 return geo_cache[ip]
@@ -186,12 +182,12 @@ jobs:
           def test_with_xray(cfg, index):
             proto, data = parse_config(cfg)
             if not proto:
-              return index, cfg, None, None, None, "parse_error"
+              return index, cfg, None, None, None, None, "parse_error"
 
             socks_port = find_free_port()
             xray_cfg, host = build_xray_config(proto, data, socks_port)
             if not xray_cfg:
-              return index, cfg, None, None, None, "build_error"
+              return index, cfg, None, None, None, None, "build_error"
 
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
               json.dump(xray_cfg, f)
@@ -207,25 +203,27 @@ jobs:
 
               result = subprocess.run(
                 ["curl", "-s", "--socks5-hostname", f"127.0.0.1:{socks_port}",
-                 "--max-time", "8", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "8", "-o", "/dev/null",
+                 "-w", "%{http_code} %{time_total}",
                  "http://cp.cloudflare.com/"],
                 capture_output=True, text=True, timeout=12
               )
-              code = result.stdout.strip()
+              parts = result.stdout.strip().split()
+              code = parts[0] if parts else ""
+              ping_ms = int(float(parts[1]) * 1000) if len(parts) > 1 else 0
               ok = code in ("200", "204")
 
               if ok:
-                # resolve دامنه به IP برای geoip
                 ip = resolve_host(host)
                 country, city = get_geoip(ip)
-                return index, cfg, host, country, city, f"http_{code}"
+                return index, cfg, host, country, city, ping_ms, f"http_{code}"
               else:
-                return index, cfg, None, None, None, f"http_{code}"
+                return index, cfg, None, None, None, None, f"http_{code}"
 
             except subprocess.TimeoutExpired:
-              return index, cfg, None, None, None, "timeout"
+              return index, cfg, None, None, None, None, "timeout"
             except Exception as e:
-              return index, cfg, None, None, None, str(e)
+              return index, cfg, None, None, None, None, str(e)
             finally:
               if proc:
                 proc.terminate()
@@ -252,27 +250,27 @@ jobs:
           with ThreadPoolExecutor(max_workers=25) as ex:
             futures = {ex.submit(test_with_xray, cfg, i): i for i, cfg in enumerate(configs)}
             for fut in as_completed(futures):
-              i, cfg, host, country, city, reason = fut.result()
-              results[i] = (cfg, host, country, city, reason)
+              i, cfg, host, country, city, ping_ms, reason = fut.result()
+              results[i] = (cfg, host, country, city, ping_ms, reason)
               done = len(results)
               if host:
                 flag = FLAGS.get(country, "🌍")
-                print(f"[{done}/{len(configs)}] ✅ {host} → {flag} {country} {city}")
+                print(f"[{done}/{len(configs)}] ✅ {host} → {flag} {country} {city} | ⚡{ping_ms}ms")
               else:
                 print(f"[{done}/{len(configs)}] ❌ {reason}")
 
           valid = []
           for i in sorted(results):
-            cfg, host, country, city, reason = results[i]
+            cfg, host, country, city, ping_ms, reason = results[i]
             if host:
               flag = FLAGS.get(country, "🌍")
-              location = f"{flag}{city or country}"
+              location = f"{flag}{city or country} | ⚡{ping_ms}ms | t.me/AmConfigGrabber"
               base = cfg.split("#")[0]
-              valid.append(f"{base}#{location} | t.me/AmConfigGrabber")
+              valid.append(f"{base}#{location}")
 
           print(f"\n✅ Valid: {len(valid)}/{len(configs)}")
 
-          # ===== تشخیص کانفیگ‌های جدید (نسبت به configs.txt قبلی) =====
+          # تشخیص کانفیگ‌های جدید نسبت به configs.txt قبلی
           old_set = set()
           if os.path.exists("configs.txt"):
             with open("configs.txt") as f:
@@ -344,11 +342,19 @@ jobs:
 
           sent = 0
           for line in new_configs:
-            cfg = line.split("#")[0]
-            text = f"<code>{escape_html(cfg)}</code>\n\n📡 t.me/AmConfigGrabber"
+            # جدا کردن کانفیگ از لیبل
+            parts = line.split("#", 1)
+            cfg = parts[0]
+            label = parts[1] if len(parts) > 1 else ""
+
+            # ساختن متن پیام با پرچم، شهر، پینگ
+            text = f"<code>{escape_html(cfg)}</code>"
+            if label:
+              text += f"\n\n🏷 {escape_html(label)}"
+
             if send_message(text):
               sent += 1
-            time.sleep(1.2)  # رعایت rate limit تلگرام (~30 پیام در ثانیه برای کانال، ولی محتاط‌تر بهتره)
+            time.sleep(1.2)
 
           print(f"✅ Sent {sent}/{len(new_configs)} configs to Telegram")
           PYEOF
