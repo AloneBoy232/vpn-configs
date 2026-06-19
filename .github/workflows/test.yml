@@ -54,8 +54,9 @@ jobs:
                 return geo_cache[ip]
             try:
               import urllib.request
+              time.sleep(0.5)
               url = f"http://ip-api.com/json/{ip}?fields=countryCode,city"
-              req = urllib.request.urlopen(url, timeout=4)
+              req = urllib.request.urlopen(url, timeout=6)
               data = json.loads(req.read())
               code = data.get("countryCode", "XX")
               city = data.get("city", "")
@@ -264,7 +265,7 @@ jobs:
             if host:
               flag = FLAGS.get(country, "🌍")
               base = cfg.split("#")[0]
-              valid.append(f"{base}#{flag} | @AmConfigGrabber")
+              valid.append(f"{base}#{flag} | ⚡{ping_ms}ms | @AmConfigGrabber")
 
           print(f"\n✅ Valid: {len(valid)}/{len(configs)}")
 
@@ -327,7 +328,12 @@ jobs:
 
           sent = 0
           for line in configs:
+            parts = line.split("#", 1)
+            cfg = parts[0]
+            label = parts[1] if len(parts) > 1 else ""
             text = f"<code>{escape_html(line)}</code>"
+            if label:
+              text += f"\n🏷 {escape_html(label)}"
             if send_message(text):
               sent += 1
               print(f"[{sent}/{len(configs)}] ✅ sent")
