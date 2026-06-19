@@ -270,26 +270,14 @@ jobs:
 
           print(f"\n✅ Valid: {len(valid)}/{len(configs)}")
 
-          # تشخیص کانفیگ‌های جدید نسبت به configs.txt قبلی
-          old_set = set()
-          if os.path.exists("configs.txt"):
-            with open("configs.txt") as f:
-              for line in f:
-                line = line.strip()
-                if line:
-                  old_set.add(line.split("#")[0])
-
-          new_configs = [v for v in valid if v.split("#")[0] not in old_set]
-          print(f"🆕 New configs to send: {len(new_configs)}")
-
+          # ذخیره همه کانفیگ‌های معتبر این دور — بدون فیلتر جدید/قدیم
           with open("configs.txt","w") as f:
             f.write("\n".join(valid))
 
-          with open("new_configs.txt","w") as f:
-            f.write("\n".join(new_configs))
+          print(f"📝 Saved {len(valid)} configs to configs.txt")
           PYEOF
 
-      - name: Send new configs to Telegram
+      - name: Send configs to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -304,18 +292,18 @@ jobs:
             print("⚠️ TELEGRAM_BOT_TOKEN یا TELEGRAM_CHANNEL_ID ست نشده — رد شد")
             raise SystemExit(0)
 
-          if not os.path.exists("new_configs.txt"):
-            print("هیچ فایل new_configs.txt پیدا نشد")
+          if not os.path.exists("configs.txt"):
+            print("فایل configs.txt پیدا نشد")
             raise SystemExit(0)
 
-          with open("new_configs.txt") as f:
-            new_configs = [l.strip() for l in f if l.strip()]
+          with open("configs.txt") as f:
+            configs = [l.strip() for l in f if l.strip()]
 
-          if not new_configs:
-            print("کانفیگ جدیدی برای ارسال نیست")
+          if not configs:
+            print("هیچ کانفیگ معتبری برای ارسال نیست")
             raise SystemExit(0)
 
-          print(f"📤 Sending {len(new_configs)} new configs to Telegram...")
+          print(f"📤 Sending {len(configs)} configs to Telegram...")
 
           def escape_html(s):
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -341,22 +329,23 @@ jobs:
               return False
 
           sent = 0
-          for line in new_configs:
-            # جدا کردن کانفیگ از لیبل
+          for line in configs:
             parts = line.split("#", 1)
             cfg = parts[0]
             label = parts[1] if len(parts) > 1 else ""
 
-            # ساختن متن پیام با پرچم، شهر، پینگ
             text = f"<code>{escape_html(cfg)}</code>"
             if label:
               text += f"\n\n🏷 {escape_html(label)}"
 
             if send_message(text):
               sent += 1
+              print(f"[{sent}/{len(configs)}] ✅ sent")
+            else:
+              print(f"[{sent}/{len(configs)}] ❌ failed")
             time.sleep(1.2)
 
-          print(f"✅ Sent {sent}/{len(new_configs)} configs to Telegram")
+          print(f"\n✅ Sent {sent}/{len(configs)} configs to Telegram")
           PYEOF
 
       - name: Commit results
