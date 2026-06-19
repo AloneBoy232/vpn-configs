@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v3
 
@@ -41,6 +41,7 @@ jobs:
 
           # کش geoip برای جلوگیری از درخواست تکراری
           geo_cache = {}
+          geo_lock = __import__("threading").Lock()
 
           def resolve_host(host):
             """اگه دامنه بود IP پشتش رو برمیگردونه"""
@@ -52,8 +53,9 @@ jobs:
 
           def get_geoip(ip):
             """کشور و شهر رو از IP میگیره"""
-            if ip in geo_cache:
-              return geo_cache[ip]
+            with geo_lock:
+              if ip in geo_cache:
+                return geo_cache[ip]
             try:
               import urllib.request
               url = f"http://ip-api.com/json/{ip}?fields=countryCode,city"
@@ -61,10 +63,12 @@ jobs:
               data = json.loads(req.read())
               code = data.get("countryCode", "XX")
               city = data.get("city", "")
-              geo_cache[ip] = (code, city)
+              with geo_lock:
+                geo_cache[ip] = (code, city)
               return code, city
             except:
-              geo_cache[ip] = ("XX", "")
+              with geo_lock:
+                geo_cache[ip] = ("XX", "")
               return "XX", ""
 
           def find_free_port():
@@ -242,10 +246,10 @@ jobs:
               seen.add(key)
               unique.append(cfg)
           configs = unique
-          print(f"Testing {len(configs)} unique configs (10 threads)...")
+          print(f"Testing {len(configs)} unique configs (25 threads)...")
 
           results = {}
-          with ThreadPoolExecutor(max_workers=10) as ex:
+          with ThreadPoolExecutor(max_workers=25) as ex:
             futures = {ex.submit(test_with_xray, cfg, i): i for i, cfg in enumerate(configs)}
             for fut in as_completed(futures):
               i, cfg, host, country, city, reason = fut.result()
@@ -267,8 +271,86 @@ jobs:
               valid.append(f"{base}#{location} | t.me/AmConfigGrabber")
 
           print(f"\n✅ Valid: {len(valid)}/{len(configs)}")
+
+          # ===== تشخیص کانفیگ‌های جدید (نسبت به configs.txt قبلی) =====
+          old_set = set()
+          if os.path.exists("configs.txt"):
+            with open("configs.txt") as f:
+              for line in f:
+                line = line.strip()
+                if line:
+                  old_set.add(line.split("#")[0])
+
+          new_configs = [v for v in valid if v.split("#")[0] not in old_set]
+          print(f"🆕 New configs to send: {len(new_configs)}")
+
           with open("configs.txt","w") as f:
             f.write("\n".join(valid))
+
+          with open("new_configs.txt","w") as f:
+            f.write("\n".join(new_configs))
+          PYEOF
+
+      - name: Send new configs to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: |
+          python3 << 'PYEOF'
+          import os, time, json, urllib.request, urllib.error
+
+          TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          CHAT_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")
+
+          if not TOKEN or not CHAT_ID:
+            print("⚠️ TELEGRAM_BOT_TOKEN یا TELEGRAM_CHANNEL_ID ست نشده — رد شد")
+            raise SystemExit(0)
+
+          if not os.path.exists("new_configs.txt"):
+            print("هیچ فایل new_configs.txt پیدا نشد")
+            raise SystemExit(0)
+
+          with open("new_configs.txt") as f:
+            new_configs = [l.strip() for l in f if l.strip()]
+
+          if not new_configs:
+            print("کانفیگ جدیدی برای ارسال نیست")
+            raise SystemExit(0)
+
+          print(f"📤 Sending {len(new_configs)} new configs to Telegram...")
+
+          def escape_html(s):
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+          def send_message(text):
+            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            payload = json.dumps({
+              "chat_id": CHAT_ID,
+              "text": text,
+              "parse_mode": "HTML",
+              "disable_web_page_preview": True,
+            }).encode()
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            try:
+              urllib.request.urlopen(req, timeout=10)
+              return True
+            except urllib.error.HTTPError as e:
+              body = e.read().decode()
+              print(f"❌ HTTP error: {e.code} - {body}")
+              return False
+            except Exception as e:
+              print(f"❌ Error: {e}")
+              return False
+
+          sent = 0
+          for line in new_configs:
+            cfg = line.split("#")[0]
+            text = f"<code>{escape_html(cfg)}</code>\n\n📡 t.me/AmConfigGrabber"
+            if send_message(text):
+              sent += 1
+            time.sleep(1.2)  # رعایت rate limit تلگرام (~30 پیام در ثانیه برای کانال، ولی محتاط‌تر بهتره)
+
+          print(f"✅ Sent {sent}/{len(new_configs)} configs to Telegram")
           PYEOF
 
       - name: Commit results
