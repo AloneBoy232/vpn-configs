@@ -1,0 +1,122 @@
+name: Test VPN Configs
+on:
+  push:
+    paths:
+      - 'raw.txt'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Test and update configs
+        run: |
+          python3 << 'PYEOF'
+          import socket, base64, json
+          from urllib.parse import urlparse
+
+          FLAGS = {
+            "IR":"🇮🇷","US":"🇺🇸","DE":"🇩🇪","FR":"🇫🇷","GB":"🇬🇧","NL":"🇳🇱",
+            "SE":"🇸🇪","NO":"🇳🇴","FI":"🇫🇮","CH":"🇨🇭","CA":"🇨🇦","AU":"🇦🇺",
+            "JP":"🇯🇵","KR":"🇰🇷","SG":"🇸🇬","HK":"🇭🇰","TW":"🇹🇼","RU":"🇷🇺",
+            "PL":"🇵🇱","CZ":"🇨🇿","AT":"🇦🇹","ES":"🇪🇸","IT":"🇮🇹","TR":"🇹🇷",
+            "IN":"🇮🇳","BR":"🇧🇷","UA":"🇺🇦","RO":"🇷🇴","CN":"🇨🇳","AE":"🇦🇪",
+            "ID":"🇮🇩","MY":"🇲🇾","TH":"🇹🇭","VN":"🇻🇳","PH":"🇵🇭","MX":"🇲🇽",
+          }
+
+          TLD_MAP = {
+            ".ir":"IR",".ru":"RU",".de":"DE",".fr":"FR",".nl":"NL",".uk":"GB",
+            ".ca":"CA",".au":"AU",".jp":"JP",".kr":"KR",".sg":"SG",".hk":"HK",
+            ".tw":"TW",".pl":"PL",".cz":"CZ",".se":"SE",".no":"NO",".fi":"FI",
+            ".ch":"CH",".at":"AT",".es":"ES",".it":"IT",".tr":"TR",".br":"BR",
+            ".ua":"UA",".ro":"RO",".cn":"CN",".us":"US",".ae":"AE",".in":"IN",
+          }
+
+          KEYWORDS = [
+            ("frankfurt","DE"),("berlin","DE"),("ger","DE"),("germany","DE"),
+            ("amsterdam","NL"),("netherlands","NL"),
+            ("paris","FR"),("france","FR"),
+            ("london","GB"),("britain","GB"),
+            ("toronto","CA"),("canada","CA"),
+            ("singapore","SG"),
+            ("tokyo","JP"),("japan","JP"),
+            ("seoul","KR"),("korea","KR"),
+            ("moscow","RU"),("russia","RU"),
+            ("tehran","IR"),("iran","IR"),
+            ("finland","FI"),("sweden","SE"),("norway","NO"),
+            ("switzerland","CH"),("austria","AT"),("poland","PL"),
+            ("ukraine","UA"),("turkey","TR"),("istanbul","TR"),
+            ("india","IN"),("brazil","BR"),("hongkong","HK"),("taiwan","TW"),
+            ("china","CN"),("dubai","AE"),("australia","AU"),
+            ("usa","US"),("newyork","US"),("losangeles","US"),("dallas","US"),
+          ]
+
+          def get_country(host):
+            lower = host.lower()
+            for tld, code in TLD_MAP.items():
+              if lower.endswith(tld):
+                return code
+            for kw, code in KEYWORDS:
+              if kw in lower:
+                return code
+            return "XX"
+
+          def parse_config(cfg):
+            try:
+              if cfg.startswith("vmess://"):
+                b64 = cfg[8:].split("#")[0]
+                data = json.loads(base64.b64decode(b64 + "==").decode())
+                return data.get("add",""), int(data.get("port",443))
+              elif cfg.startswith(("vless://","trojan://")):
+                u = urlparse(cfg)
+                return u.hostname, u.port or 443
+              elif cfg.startswith("ss://"):
+                u = urlparse(cfg)
+                return u.hostname, u.port or 443
+            except:
+              pass
+            return None, None
+
+          def tcp_test(host, port, timeout=5):
+            try:
+              s = socket.socket()
+              s.settimeout(timeout)
+              s.connect((host, int(port)))
+              s.close()
+              return True
+            except:
+              return False
+
+          with open("raw.txt") as f:
+            configs = [l.strip() for l in f if l.strip()]
+
+          print(f"Testing {len(configs)} configs...")
+          valid = []
+          for i, cfg in enumerate(configs):
+            host, port = parse_config(cfg)
+            if not host:
+              print(f"[{i+1}/{len(configs)}] ❌ parse error")
+              continue
+            if tcp_test(host, port):
+              country = get_country(host)
+              flag = FLAGS.get(country, "🌍")
+              base = cfg.split("#")[0]
+              valid.append(f"{base}#{flag}t.me/AmConfigGrabber")
+              print(f"[{i+1}/{len(configs)}] ✅ {host} → {flag}")
+            else:
+              print(f"[{i+1}/{len(configs)}] ❌ {host}")
+
+          print(f"\nValid: {len(valid)}/{len(configs)}")
+          with open("configs.txt","w") as f:
+            f.write("\n".join(valid))
+          PYEOF
+
+      - name: Commit
+        run: |
+          git config user.email "bot@github.com"
+          git config user.name "VPN Bot"
+          git add configs.txt
+          git diff --staged --quiet && echo "No changes" || git commit -m "✅ $(wc -l < configs.txt) valid configs" && git push
