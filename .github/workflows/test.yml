@@ -41,7 +41,6 @@ jobs:
 
           # کش geoip برای جلوگیری از درخواست تکراری
           geo_cache = {}
-          geo_lock = __import__("threading").Lock()
 
           def resolve_host(host):
             """اگه دامنه بود IP پشتش رو برمیگردونه"""
@@ -53,9 +52,8 @@ jobs:
 
           def get_geoip(ip):
             """کشور و شهر رو از IP میگیره"""
-            with geo_lock:
-              if ip in geo_cache:
-                return geo_cache[ip]
+            if ip in geo_cache:
+              return geo_cache[ip]
             try:
               import urllib.request
               url = f"http://ip-api.com/json/{ip}?fields=countryCode,city"
@@ -63,12 +61,10 @@ jobs:
               data = json.loads(req.read())
               code = data.get("countryCode", "XX")
               city = data.get("city", "")
-              with geo_lock:
-                geo_cache[ip] = (code, city)
+              geo_cache[ip] = (code, city)
               return code, city
             except:
-              with geo_lock:
-                geo_cache[ip] = ("XX", "")
+              geo_cache[ip] = ("XX", "")
               return "XX", ""
 
           def find_free_port():
@@ -246,10 +242,10 @@ jobs:
               seen.add(key)
               unique.append(cfg)
           configs = unique
-          print(f"Testing {len(configs)} unique configs (25 threads)...")
+          print(f"Testing {len(configs)} unique configs (10 threads)...")
 
           results = {}
-          with ThreadPoolExecutor(max_workers=25) as ex:
+          with ThreadPoolExecutor(max_workers=10) as ex:
             futures = {ex.submit(test_with_xray, cfg, i): i for i, cfg in enumerate(configs)}
             for fut in as_completed(futures):
               i, cfg, host, country, city, reason = fut.result()
