@@ -344,9 +344,19 @@ jobs:
           print(f"\n✅ Sent {sent}/{len(configs)} configs to Telegram")
           PYEOF
 
-      - name: Commit results
+            - name: Commit & Push results
         run: |
-          git config user.email "bot@github.com"
           git config user.name "VPN Bot"
+          git config user.email "bot@github.com"
+          
           git add configs.txt
-          git diff --staged --quiet && echo "No changes" || (git commit -m "✅ $(wc -l < configs.txt) valid configs" && git push)
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "✅ $(wc -l < configs.txt) valid configs"
+          
+          git pull --rebase origin main || echo "Pull failed"
+          git push || git push --force-with-lease
